@@ -2,7 +2,7 @@
 
 **Build beautiful Discord messages and interactive UIs without fighting Discord's API.**
 
-`frame` is a developer-experience layer on top of [discord.py](https://github.com/Rapptz/discord.py). It doesn't replace discord.py, doesn't add a second bot framework, and doesn't hide anything you need to understand — it just makes the parts of the Discord API you write over and over (embeds, buttons, Components V2 layouts) dramatically less verbose, with validation that catches mistakes before Discord does.
+`frame` is a developer-experience layer on top of [discord.py](https://github.com/Rapptz/discord.py). It doesn't replace discord.py, doesn't add a second bot framework, and doesn't hide anything you need to understand, isn't overcomplicated — it just makes the parts of the Discord API you write over and over (embeds, buttons, Components V2 layouts) dramatically less verbose, with validation that catches mistakes before Discord does.
 
 ```python
 import frame
