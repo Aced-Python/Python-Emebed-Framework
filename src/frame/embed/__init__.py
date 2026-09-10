@@ -1,4 +1,4 @@
-from frame.embed.builder import Embed, EmbedBuilder, embed
-from frame.embed.models import Author, EmbedField, Footer, Theme
+from .builder import Embed, Field, embed
+from .theme import Theme, get_theme, set_theme
 
-__all__ = ["embed", "Embed", "EmbedBuilder", "Theme", "Author", "Footer", "EmbedField"]
+__all__ = ["embed", "Embed", "Field", "Theme", "set_theme", "get_theme"]

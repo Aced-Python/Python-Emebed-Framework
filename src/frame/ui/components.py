@@ -1,175 +1,180 @@
+"""Non-interactive layout components: text, separator, thumbnail, media, file."""
+
 from __future__ import annotations
 
-from typing import Any, Awaitable, Callable, Iterable
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-from frame.colors import normalize
-from frame.exceptions import CompatibilityError, FrameValidationError, InvalidComponentError
-from frame.options import Option
+from ..attachments import Image, ImageInput, coerce_image
+from ..exceptions import InvalidComponentError
+from .base import Component
 
-Callback = Callable[[Any], Awaitable[Any]]
-
-
-def _ui():
+if TYPE_CHECKING:
     import discord
 
-    if not hasattr(discord.ui, "LayoutView"):
-        raise CompatibilityError("Frame Components V2 requires discord.py 2.6 or newer (discord.ui.LayoutView).")
-    return discord.ui
+TEXT_DISPLAY_LIMIT = 4000
 
 
-def _button_style(style: str | int | None):
-    ui = _ui()
-    if style is None:
-        return ui.ButtonStyle.secondary
-    if isinstance(style, int):
-        return ui.ButtonStyle(style)
-    key = style.lower().replace("-", "_")
-    mapping = {"primary": ui.ButtonStyle.primary, "secondary": ui.ButtonStyle.secondary, "success": ui.ButtonStyle.success, "danger": ui.ButtonStyle.danger, "link": ui.ButtonStyle.link}
-    try:
-        return mapping[key]
-    except KeyError as exc:
-        raise InvalidComponentError(f"Unknown button style {style!r}; use primary, secondary, success, danger, or link.") from exc
+@dataclass
+class Text(Component):
+    """A Markdown text block (``discord.ui.TextDisplay``)."""
+
+    content: str
+    kind: str = "text"
+
+    def validate(self) -> None:
+        if not self.content:
+            raise InvalidComponentError("TextDisplay content cannot be empty")
+        if len(self.content) > TEXT_DISPLAY_LIMIT:
+            raise InvalidComponentError(
+                "Text component content exceeds Discord's character limit",
+                current=len(self.content),
+                maximum=TEXT_DISPLAY_LIMIT,
+            )
+
+    def to_discord(self) -> discord.ui.TextDisplay:
+        import discord
+
+        return discord.ui.TextDisplay(self.content)
+
+    def to_dict(self) -> dict:
+        return {"kind": self.kind, "content": self.content}
 
 
-class _CallbackMixin:
-    _frame_callback: Callback | None = None
-
-    def on_click(self, function: Callback):
-        """Register an async interaction callback with decorator syntax."""
-        self._frame_callback = function
-        return self
+_VALID_SPACING = {"small", "large"}
 
 
-class FrameButton(_CallbackMixin, _ui().Button):
-    """A native discord.py Button with a small decorator convenience."""
+@dataclass
+class Separator(Component):
+    """A divider/spacer (``discord.ui.Separator``)."""
 
-    def __init__(self, label: str | None = None, *, style: str | int | None = None, custom_id: str | None = None, url: str | None = None, emoji: Any = None, disabled: bool = False, row: int | None = None):
-        if url is not None and custom_id is not None:
-            raise InvalidComponentError("Link buttons cannot specify custom_id; Discord uses the URL as the target.")
-        chosen = _button_style(style)
-        if url is not None:
-            chosen = _button_style("link")
-        elif chosen == _button_style("link"):
-            raise InvalidComponentError("A link button requires url=.")
-        if label is not None and len(label) > 80:
-            raise FrameValidationError(f"Button label exceeds Discord's 80 character limit; current: {len(label)}.")
-        super().__init__(style=chosen, label=label, custom_id=custom_id, url=url, emoji=emoji, disabled=disabled, row=row)
+    visible: bool = True
+    spacing: str = "small"
+    kind: str = "separator"
 
-    async def callback(self, interaction: Any) -> None:
-        if self._frame_callback is not None:
-            await self._frame_callback(interaction)
+    def validate(self) -> None:
+        if self.spacing not in _VALID_SPACING:
+            raise InvalidComponentError(
+                f"Invalid separator spacing {self.spacing!r}. "
+                f"Expected one of: {', '.join(sorted(_VALID_SPACING))}."
+            )
+
+    def to_discord(self) -> discord.ui.Separator:
+        import discord
+
+        spacing = (
+            discord.SeparatorSpacing.large
+            if self.spacing == "large"
+            else discord.SeparatorSpacing.small
+        )
+        return discord.ui.Separator(visible=self.visible, spacing=spacing)
+
+
+@dataclass
+class Thumbnail(Component):
+    """A small accessory image, typically used as a Section's accessory."""
+
+    media: ImageInput
+    description: str | None = None
+    spoiler: bool = False
+    kind: str = "thumbnail"
+    interactive: bool = False  # placement rules match Section-accessory items
+
+    def validate(self) -> None:
+        coerce_image(self.media)
+
+    def to_discord(self) -> discord.ui.Thumbnail:
+        import discord
+
+        image = coerce_image(self.media)
+        assert image is not None  # `media` is required, never None
+        return discord.ui.Thumbnail(
+            image.as_url, description=self.description, spoiler=self.spoiler
+        )
+
+    def local_images(self) -> list[Image]:
+        image = coerce_image(self.media)
+        return [image] if image and image.is_local else []
+
+
+@dataclass
+class MediaGallery(Component):
+    """A grid of images (``discord.ui.MediaGallery``)."""
+
+    items: tuple  # tuple[ImageInput | tuple[ImageInput, str | None]]
+    kind: str = "media_gallery"
+
+    def __init__(self, *items: ImageInput | tuple) -> None:
+        if not items:
+            raise InvalidComponentError("MediaGallery needs at least one image")
+        if len(items) > 10:
+            raise InvalidComponentError(
+                "MediaGallery has too many images", current=len(items), maximum=10
+            )
+        self.items = items
+
+    def validate(self) -> None:
+        for item in self.items:
+            image, _description = self._split(item)
+            coerce_image(image)
+
+    @staticmethod
+    def _split(item) -> tuple[ImageInput, str | None]:
+        if isinstance(item, tuple):
+            return item[0], (item[1] if len(item) > 1 else None)
+        return item, None
+
+    def to_discord(self) -> discord.ui.MediaGallery:
+        import discord
+
+        gallery_items = []
+        for item in self.items:
+            image, description = self._split(item)
+            resolved = coerce_image(image)
+            assert resolved is not None  # each gallery item is a required image
+            gallery_items.append(
+                discord.MediaGalleryItem(resolved.as_url, description=description)
+            )
+        return discord.ui.MediaGallery(*gallery_items)
+
+    def local_images(self) -> list[Image]:
+        images = []
+        for item in self.items:
+            image, _ = self._split(item)
+            resolved = coerce_image(image)
+            if resolved and resolved.is_local:
+                images.append(resolved)
+        return images
+
+
+@dataclass
+class FileDisplay(Component):
+    """An attached file shown inline (``discord.ui.File``). Requires a local file."""
+
+    media: str | Image
+    spoiler: bool = False
+    kind: str = "file"
+
+    def validate(self) -> None:
+        image = self.media if isinstance(self.media, Image) else None
+        if image is None and isinstance(self.media, str) and not self.media.startswith(
+            "attachment://"
+        ):
+            raise InvalidComponentError(
+                "File component requires a local attachment "
+                "(frame.attachment(path) or an 'attachment://name' reference), "
+                f"got a plain URL: {self.media!r}. Discord's File component only "
+                "displays uploaded attachments, not arbitrary URLs."
+            )
+
+    def to_discord(self) -> discord.ui.File:
+        import discord
+
+        if isinstance(self.media, Image):
+            ref = self.media.as_url
         else:
-            await super().callback(interaction)
+            ref = self.media
+        return discord.ui.File(ref, spoiler=self.spoiler)
 
-
-class FrameSelect(_CallbackMixin, _ui().Select):
-    """Native string select with the same callback convenience as FrameButton."""
-
-    async def callback(self, interaction: Any) -> None:
-        if self._frame_callback is not None:
-            await self._frame_callback(interaction)
-        else:
-            await super().callback(interaction)
-
-
-class FrameView(_ui().LayoutView):
-    """Native LayoutView with deterministic JSON/debug helpers."""
-
-    def __init__(self, *items: Any, timeout: float | None = 180) -> None:
-        super().__init__(timeout=timeout)
-        for item in items:
-            self.add_item(item)
-        self._validate_tree()
-
-    def _validate_tree(self) -> None:
-        if len(self.walk_children()) > 40:
-            raise InvalidComponentError("Components V2 messages may contain at most 40 total components.")
-        if self.content_length() > 4000:
-            raise FrameValidationError("Components V2 text exceeds Discord's 4000 character display limit.")
-
-    def to_dict(self) -> dict[str, Any]:
-        return {"components": self.to_components(), "is_components_v2": True}
-
-    def to_discord(self) -> "FrameView":
-        return self
-
-
-def button(label: str | None = None, *, style: str | int | None = None, custom_id: str | None = None, url: str | None = None, emoji: Any = None, disabled: bool = False, row: int | None = None) -> FrameButton:
-    return FrameButton(label, style=style, custom_id=custom_id, url=url, emoji=emoji, disabled=disabled, row=row)
-
-
-def text(content: Any):
-    ui = _ui()
-    value = str(content)
-    if len(value) > 4000:
-        raise FrameValidationError(f"Text display exceeds Discord's 4000 character limit; current: {len(value)}.")
-    return ui.TextDisplay(value)
-
-
-def separator(*, visible: bool = True, spacing: str | int | None = None):
-    ui = _ui()
-    if spacing is None:
-        return ui.Separator(visible=visible)
-    mapping = {"small": getattr(ui.SeparatorSpacing, "small", 1), "large": getattr(ui.SeparatorSpacing, "large", 2)}
-    if isinstance(spacing, str) and spacing not in mapping:
-        raise InvalidComponentError("Separator spacing must be 'small' or 'large'.")
-    return ui.Separator(visible=visible, spacing=mapping[spacing] if isinstance(spacing, str) else spacing)
-
-
-def section(*children: Any, accessory: Any):
-    ui = _ui()
-    if not children:
-        raise InvalidComponentError("A section requires at least one text display child.")
-    if len(children) > 3:
-        raise InvalidComponentError("A Discord section can contain at most 3 text display items.")
-    if not all(isinstance(child, ui.TextDisplay) for child in children):
-        raise InvalidComponentError("Section children must be TextDisplay components.")
-    if not isinstance(accessory, (ui.Thumbnail, ui.Button)):
-        raise InvalidComponentError("Section accessories must be a thumbnail or button.")
-    return ui.Section(*children, accessory=accessory)
-
-
-def thumbnail(media: Any, *, spoiler: bool = False):
-    return _ui().Thumbnail(media, spoiler=spoiler)
-
-
-def media_item(media: Any, *, description: str | None = None, spoiler: bool = False):
-    return _ui().MediaGalleryItem(media, description=description, spoiler=spoiler)
-
-
-def media_gallery(*items: Any):
-    ui = _ui()
-    normalized = [item if isinstance(item, ui.MediaGalleryItem) else media_item(item) for item in items]
-    if len(normalized) > 10:
-        raise InvalidComponentError("A media gallery may contain at most 10 items.")
-    return ui.MediaGallery(*normalized)
-
-
-def action_row(*items: Any):
-    ui = _ui()
-    if len(items) == 1 and hasattr(ui, "BaseSelect") and isinstance(items[0], ui.BaseSelect):
-        return ui.ActionRow(*items)
-    if len(items) == 1 and isinstance(items[0], ui.Select):
-        return ui.ActionRow(*items)
-    if len(items) > 5:
-        raise InvalidComponentError("An action row may contain at most 5 buttons.")
-    if not all(isinstance(item, ui.Button) for item in items):
-        raise InvalidComponentError("Action rows accept buttons or a single select menu.")
-    return ui.ActionRow(*items)
-
-
-def container(*children: Any, accent_color: Any = None, spoiler: bool = False, timeout: float | None = 180) -> FrameView:
-    ui = _ui()
-    color = normalize(accent_color)
-    root = ui.Container(*children, accent_color=int(color) if color else None, spoiler=spoiler)
-    return FrameView(root, timeout=timeout)
-
-
-def file(media: Any, *, spoiler: bool = False):
-    return _ui().File(media, spoiler=spoiler)
-
-
-def select(options: Iterable[Any], *, placeholder: str | None = None, custom_id: str | None = None, min_values: int = 1, max_values: int = 1, disabled: bool = False) -> FrameSelect:
-    ui = _ui()
-    normalized = [option.to_discord() if isinstance(option, Option) else option for option in options]
-    return FrameSelect(options=normalized, placeholder=placeholder, custom_id=custom_id, min_values=min_values, max_values=max_values, disabled=disabled)
+    def local_images(self) -> list[Image]:
+        return [self.media] if isinstance(self.media, Image) and self.media.is_local else []

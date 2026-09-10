@@ -1,11 +1,10 @@
-## Summary
+## What does this change?
 
-## Tests
+<!-- One or two sentences. Link the issue if this is an API change (see CONTRIBUTING.md). -->
 
-- [ ] Added/updated tests
-- [ ] Documentation updated
-- [ ] No live Discord dependency in tests
+## Checklist
 
-## Compatibility
-
-Describe any public API or serialization changes.
+- [ ] Tests added/updated for the change
+- [ ] `pytest`, `ruff check src/ tests/`, and `mypy src/frame` all pass locally
+- [ ] `CHANGELOG.md` updated under `## [Unreleased]` (for user-facing changes)
+- [ ] README updated if this adds/changes a public API

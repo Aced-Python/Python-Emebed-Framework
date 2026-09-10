@@ -1,62 +1,67 @@
-"""Frame — build beautiful Discord messages and Components V2 UIs with less ceremony."""
+"""
+frame — a developer-experience layer for building Discord embeds and
+Components V2 interfaces on top of discord.py.
 
-from contextvars import ContextVar
-from importlib import import_module
-from typing import Any
+    import frame
 
-from frame.attachments import Attachment, Image, attachment, to_discord_files
-from frame.options import Option
-from frame.colors import Color
-from frame.embed import Author, Embed, EmbedBuilder, EmbedField, Footer, Theme
-from frame.embed.builder import embed as _embed
-from frame.exceptions import AttachmentError, CompatibilityError, FrameError, FrameValidationError, InvalidColorError, InvalidComponentError, InvalidEmbedError
-from frame.markdown import Markdown
-import frame.markdown as _markdown
+    embed = frame.embed("Welcome!", "Thanks for joining.")
+    await channel.send(embed=embed)
 
-__version__ = "0.1.0"
-_theme: ContextVar[Theme | None] = ContextVar("frame_theme", default=None)
+Everything Frame produces is a real discord.py object underneath — you can
+always drop back to raw discord.py at any point.
+"""
 
+from __future__ import annotations
 
-def set_theme(theme: Theme | None) -> None:
-    """Set the default theme for the current async/context-local execution context."""
-    _theme.set(theme)
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _version
 
+try:
+    __version__ = _version("frame-discord")
+except PackageNotFoundError:  # pragma: no cover - local/editable checkout
+    __version__ = "0.0.0.dev0"
 
-def get_theme() -> Theme | None:
-    return _theme.get()
+from . import ui
+from .attachments import Image, attachment
+from .colors import Color, colors
+from .embed.builder import Embed, embed
+from .embed.theme import Theme, get_theme, set_theme
+from .exceptions import (
+    AttachmentError,
+    FrameError,
+    FrameValidationError,
+    InvalidColorError,
+    InvalidComponentError,
+    InvalidEmbedError,
+)
+from .markdown import _Markdown
+from .ui import Option
 
+md = _Markdown()
+"""Markdown helpers and composition — see :mod:`frame.markdown`.
 
-def embed(*args: Any, theme: Theme | None = None, **kwargs: Any):
-    """Create a native ``discord.Embed`` with Frame's ergonomic API."""
-    return _embed(*args, theme=theme or _theme.get(), **kwargs)
+Callable directly to compose fragments (``frame.md(a, b, c)``), and exposes
+formatting helpers as attributes (``frame.md.bold(...)``).
+"""
 
-
-class _MarkdownNamespace:
-    Markdown = Markdown
-    bold = staticmethod(_markdown.bold)
-    italic = staticmethod(_markdown.italic)
-    underline = staticmethod(_markdown.underline)
-    strike = staticmethod(_markdown.strike)
-    code = staticmethod(_markdown.code)
-    codeblock = staticmethod(_markdown.codeblock)
-    link = staticmethod(_markdown.link)
-    heading = staticmethod(_markdown.heading)
-    quote = staticmethod(_markdown.quote)
-    mention = staticmethod(_markdown.mention)
-    channel = staticmethod(_markdown.channel)
-    role = staticmethod(_markdown.role)
-    __call__ = staticmethod(_markdown.md)
-
-
-md = _MarkdownNamespace()
-
-
-def __getattr__(name: str):
-    if name == "colors":
-        return import_module("frame.colors")
-    if name == "ui":
-        return import_module("frame.ui")
-    raise AttributeError(name)
-
-
-__all__ = ["__version__", "embed", "Embed", "EmbedBuilder", "EmbedField", "Author", "Footer", "Theme", "Color", "colors", "md", "ui", "Option", "Attachment", "Image", "attachment", "to_discord_files", "set_theme", "get_theme", "FrameError", "FrameValidationError", "InvalidEmbedError", "InvalidColorError", "InvalidComponentError", "AttachmentError", "CompatibilityError"]
+__all__ = [
+    "__version__",
+    "embed",
+    "Embed",
+    "Theme",
+    "set_theme",
+    "get_theme",
+    "colors",
+    "Color",
+    "attachment",
+    "Image",
+    "md",
+    "ui",
+    "Option",
+    "FrameError",
+    "FrameValidationError",
+    "InvalidEmbedError",
+    "InvalidColorError",
+    "InvalidComponentError",
+    "AttachmentError",
+]

@@ -1,54 +1,55 @@
 # Architecture
 
-## Design principles
+## Layering
 
-### 1. Native outputs
-
-The public builders compile directly to `discord.Embed`, `discord.File`, `discord.ui.*`, and `discord.ui.LayoutView` instances. There is no second networking layer and no hidden bot lifecycle.
-
-### 2. Validation before HTTP
-
-The library mirrors documented limits where practical. It should be easier to diagnose a broken payload locally than after Discord returns `400 Bad Request`.
-
-### 3. Progressive disclosure
-
-The function API is deliberately small. Advanced users can switch to `EmbedBuilder`, native discord.py subclasses, or raw component constructors without leaving Frame's mental model.
-
-### 4. Deterministic serialization
-
-`discord.py` owns canonical Discord payload behavior. Frame's `to_dict()` helpers expose a stable debugging boundary, but do not attempt to become a duplicate Discord protocol implementation.
-
-### 5. Compatibility layer, not replacement runtime
-
-Frame must remain embeddable in ordinary cogs, commands, listeners, persistent views, and interaction handlers.
-
-## Package layout
-
-```text
-src/frame/
-├── attachments/    local-file descriptors and upload conversion
-├── colors/         immutable color normalization
-├── embed/          ergonomic embed builder + Discord compilation
-├── markdown/       small Discord-markdown composition helpers
-├── ui/             Components V2 factories and callback conveniences
-├── exceptions.py   user-facing error taxonomy
-└── __init__.py     small public surface
+```
+your bot code
+      │
+      ▼
+   frame            (this package — pure developer-experience layer)
+      │
+      ▼
+  discord.py         (does everything Discord-protocol-related: gateway, REST, caching)
+      │
+      ▼
+  Discord API
 ```
 
-## Components V2 strategy
+Frame never talks to Discord's API or gateway directly, never opens a connection, and never runs a background task. It is exclusively a construction/validation layer: you build a `frame.embed(...)` or `frame.ui.container(...)`, get back a real discord.py object, and hand that to discord.py exactly as you would have built it by hand.
 
-Discord's current component reference exposes message layout and modal primitives separately. Frame's message API therefore mirrors the message-oriented V2 tree first: Container → TextDisplay / Section / Separator / MediaGallery / ActionRow / File, with Button and select primitives where Discord permits them. Modal-only components are intentionally kept out of `frame.ui.container()`.
+## Two-stage component construction
 
-The root object is a native `discord.ui.LayoutView`. This is important because `discord.py` handles the Components V2 message flag and view lifecycle. Frame should not duplicate that machinery. The library should also preserve the escape hatch to raw `discord.py` components.
+The riskiest part of a library like this is Components V2, because Discord's placement rules (a button must be in an action row or a section accessory; an action row can't mix a select with buttons; etc.) are easy to violate by accident, and violating them is only discovered as an HTTP 400 at send time.
 
-## Themes
+Frame splits construction into two stages to catch these earlier:
 
-Themes are plain data objects, not global mutable configuration. `frame.set_theme()` stores the current default in a `contextvars.ContextVar`, so concurrent interactions do not share mutable theme state.
+1. **Spec objects** (`frame/ui/*.py`, `frame/embed/models.py`) — plain Python objects with no discord.py dependency at construction time. `frame.ui.text(...)`, `frame.ui.button(...)`, `frame.ui.section(...)`, etc. all return these. Each has:
+   - `.validate()` — raises `InvalidComponentError`/`InvalidEmbedError` with a message naming the rule, the value, and the limit
+   - `.to_dict()` — a JSON-ish summary for debugging/logging/tests, no Discord connection needed
+   - `.to_discord()` — converts this one object to its real `discord.ui.*` (or `discord.Embed`) counterpart
 
-## Attachments
+2. **Tree validation + conversion** (`frame/ui/containers.py`'s `Container.validate()`, invoked from `frame.ui.container(...)`) — walks the whole tree, checking cross-component rules that no single component can check about itself (e.g. "this button's parent is a bare container, not an action row"), then converts every node to its real discord.py object and wraps the result in a `discord.ui.LayoutView`.
 
-A local upload is represented as a lazy `Attachment` descriptor. The descriptor knows how to produce a `discord.File` and how to produce an `attachment://filename` URL. Frame never opens files at import time and never claims that a path is a remote URL.
+This means:
 
-## Future visual tooling
+- Individual components are unit-testable without any Discord connection (`frame/tests/test_ui.py` never imports a live bot).
+- Validation errors happen at construction time, in your code, with a stack trace pointing at your call — not as an opaque Discord API rejection.
+- The final object returned to your bot code is never a frame-specific wrapper — it's the genuine discord.py object, so it composes normally with everything else discord.py offers (persistent views, `bot.add_view(...)`, etc.).
 
-A future Frame Studio should consume the same deterministic object graph exposed through Frame's JSON/debug boundary. The Python package should not depend on the web application; Studio can be a separate product that imports/export serialized Frame trees.
+## Why embeds don't need the two-stage split
+
+Embeds have no cross-field placement rules the way Components V2 does — every embed limit (title length, field count, total length) is checkable against the embed's own data. So `frame.embed(...)` validates and converts in one step. The `frame.Embed()` fluent builder still separates "build up state" from "validate + convert" (via `.to_discord()`/`.to_dict()`), which is what makes conditional/incremental embed construction pleasant.
+
+## Where local image files fit in
+
+Discord embeds can only reference images by URL, including the special `attachment://filename` form for files uploaded alongside the message. `frame.Image` (constructed via `frame.attachment(path)`) models this: it resolves to an `attachment://` URL for embed purposes, and separately exposes `.to_discord_file()` to produce the real `discord.File` needed in the `files=` kwarg of `channel.send(...)`. `Embed.files()` collects every local image referenced by an embed so you don't have to track them by hand.
+
+## Errors
+
+Every exception frame raises derives from `frame.FrameError`. The two validation subtypes — `InvalidEmbedError` and `InvalidComponentError` — both carry structured `current`/`maximum` attributes in addition to a formatted message, so downstream tooling (like the planned `frame check` CLI) can consume them programmatically rather than parsing strings.
+
+## What frame deliberately does not do
+
+- **No second event system.** Interaction callbacks (`on_click=`, `@button.on_click`) are thin wrappers that get assigned directly to the real `discord.ui.Item.callback` — dispatch is still discord.py's.
+- **No metaclass magic.** Class-based views (see the roadmap) are deferred specifically because discord.py's own view metaclass is intricate, and a half-correct reimplementation would be worse than not having the feature.
+- **No hidden network calls.** Frame never fetches a URL, resolves a Discord ID, or makes an API request on your behalf.

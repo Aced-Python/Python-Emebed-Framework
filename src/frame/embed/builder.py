@@ -1,127 +1,229 @@
+"""Public embed API.
+
+Two equivalent ways to build an embed:
+
+Functional, for the common case::
+
+    frame.embed("Welcome", "Thanks for joining!", color="blurple")
+
+Fluent, when you're assembling an embed conditionally/incrementally::
+
+    (
+        frame.Embed()
+        .title("Welcome")
+        .description("Thanks for joining!")
+        .color("blurple")
+        .field("Members", "100", inline=True)
+    )
+
+Both produce the same object and both ultimately call ``.to_discord()``
+to become a real ``discord.Embed``.
+"""
+
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Any, Iterable, TYPE_CHECKING
+import datetime as _dt
+from collections.abc import Sequence
+from typing import TYPE_CHECKING
+
+from ..attachments import ImageInput, coerce_image
+from ..colors import Color, ColorInput
+from .models import EmbedData, Field
+from .theme import Theme, get_theme
 
 if TYPE_CHECKING:
     import discord
 
-from frame.attachments import Attachment
-from frame.colors import Color, normalize
-from frame.embed.models import Author, EmbedBuilder, EmbedField, Footer, Theme, validate_embed
+FieldInput = tuple | Field | dict
 
 
-def _media_url(value: Any) -> tuple[str | None, list[Attachment]]:
-    if value is None:
-        return None, []
-    if isinstance(value, Attachment):
-        return value.attachment_url, [value]
-    return str(value), []
-
-
-def _apply_theme(builder: EmbedBuilder, *, color: Any, footer: Any, footer_icon: Any, author: Any, thumbnail: Any) -> tuple[Any, Any, Any, Any, Any]:
-    if builder._theme is None:
-        return color, footer, footer_icon, author, thumbnail
-    return builder._theme.apply(color=color, footer=footer, footer_icon=footer_icon, author=author, thumbnail=thumbnail)
-
-
-_FRAME_EMBED_TYPE = None
-
-
-def _compile_embed(builder: EmbedBuilder):
-    # Validate before importing discord so deterministic validation errors do not depend on runtime availability.
-    color, footer, footer_icon, author, thumbnail = _apply_theme(
-        builder,
-        color=builder._color,
-        footer=builder._footer.text if builder._footer else None,
-        footer_icon=builder._footer.icon_url if builder._footer else None,
-        author=builder._author,
-        thumbnail=builder._thumbnail,
+def _coerce_field(f: FieldInput) -> Field:
+    if isinstance(f, Field):
+        return f
+    if isinstance(f, dict):
+        return Field(
+            name=f["name"], value=f["value"], inline=bool(f.get("inline", False))
+        )
+    if isinstance(f, tuple):
+        if len(f) == 2:
+            name, value = f
+            return Field(name=str(name), value=str(value), inline=False)
+        if len(f) == 3:
+            name, value, inline = f
+            return Field(name=str(name), value=str(value), inline=bool(inline))
+    raise TypeError(
+        f"Invalid field: {f!r}. Expected a (name, value), (name, value, inline) "
+        "tuple, a dict with 'name'/'value'/'inline', or a frame.embed.Field."
     )
-    normalized_footer = None if footer is None else Footer(str(footer), footer_icon)
-    validate_embed(title=builder._title, description=builder._description, fields=builder._fields, footer=normalized_footer, author=author)
-
-    import discord
-
-    global _FRAME_EMBED_TYPE
-    if _FRAME_EMBED_TYPE is None:
-        class FrameEmbed(discord.Embed):
-            """Native discord.py embed with Frame attachment metadata and fluent escape hatches."""
-
-            def to_discord(self):
-                return self
-        _FRAME_EMBED_TYPE = FrameEmbed
-
-    title = builder._title
-    description = builder._description
-    normalized_color = normalize(color)
-    if isinstance(author, str):
-        author = Author(author)
-
-    embed = _FRAME_EMBED_TYPE(title=title, description=description, url=builder._url, timestamp=builder._timestamp, color=int(normalized_color) if normalized_color else None)
-    for field in builder._fields:
-        embed.add_field(name=field.name, value=field.value, inline=field.inline)
-    if normalized_footer:
-        embed.set_footer(text=normalized_footer.text, icon_url=normalized_footer.icon_url)
-    if author:
-        embed.set_author(name=author.name, url=author.url, icon_url=author.icon_url)
-    extra_files: list[Attachment] = []
-    for attr, method in ((builder._thumbnail, "set_thumbnail"), (builder._image, "set_image")):
-        url, files = _media_url(attr)
-        extra_files.extend(files)
-        if url:
-            getattr(embed, method)(url=url)
-    embed._frame_attachments = tuple(extra_files)
-    return embed
 
 
-def _parse_fields(fields: Iterable[Any] | None) -> list[EmbedField]:
-    result: list[EmbedField] = []
-    for field in fields or ():
-        if isinstance(field, EmbedField):
-            result.append(field)
-        else:
-            if len(field) not in (2, 3):
-                raise ValueError("Embed fields must be (name, value) or (name, value, inline).")
-            result.append(EmbedField(str(field[0]), str(field[1]), bool(field[2]) if len(field) == 3 else False))
-    return result
+class Embed:
+    """A fluent, immutable-feeling embed builder.
+
+    Every mutator method returns ``self`` so calls chain, but note this is
+    a *builder*, not a frozen value: chaining mutates and returns the same
+    instance. Call :meth:`build` (or just pass it wherever a
+    ``discord.Embed`` is expected — Frame objects convert automatically at
+    the boundary) when you're done.
+    """
+
+    def __init__(self) -> None:
+        self._data = EmbedData()
+
+    # -- content -----------------------------------------------------
+    def title(self, value: str) -> Embed:
+        self._data.title = value
+        return self
+
+    def description(self, value: str) -> Embed:
+        self._data.description = value
+        return self
+
+    def url(self, value: str) -> Embed:
+        self._data.url = value
+        return self
+
+    def color(self, value: ColorInput) -> Embed:
+        self._data.color = Color(value)
+        return self
+
+    # British spelling alias, since discord.py itself accepts both.
+    colour = color
+
+    def timestamp(self, value: _dt.datetime | None = None) -> Embed:
+        self._data.timestamp = value or _dt.datetime.now(_dt.timezone.utc)
+        return self
+
+    def footer(self, text: str, *, icon: ImageInput = None) -> Embed:
+        self._data.footer = text
+        if icon is not None:
+            self._data.footer_icon = coerce_image(icon)
+        return self
+
+    def author(
+        self, name: str, *, url: str | None = None, icon: ImageInput = None
+    ) -> Embed:
+        self._data.author = name
+        self._data.author_url = url
+        if icon is not None:
+            self._data.author_icon = coerce_image(icon)
+        return self
+
+    def thumbnail(self, image: ImageInput) -> Embed:
+        self._data.thumbnail = coerce_image(image)
+        return self
+
+    def image(self, image: ImageInput) -> Embed:
+        self._data.image = coerce_image(image)
+        return self
+
+    def field(self, name: str, value: str, inline: bool = False) -> Embed:
+        self._data.fields.append(Field(name=name, value=value, inline=inline))
+        return self
+
+    def fields_from(self, fields: Sequence[FieldInput]) -> Embed:
+        for f in fields:
+            self._data.fields.append(_coerce_field(f))
+        return self
+
+    def clear_fields(self) -> Embed:
+        self._data.fields.clear()
+        return self
+
+    # -- theming -------------------------------------------------------
+    def apply_theme(self, theme: Theme | None = None) -> Embed:
+        """Fill unset title/color/footer/author/thumbnail from a theme.
+
+        Uses the active theme set via ``frame.set_theme(...)`` if none is
+        given. Values you've already set are never overwritten.
+        """
+        self._data.apply_theme(theme if theme is not None else get_theme())
+        return self
+
+    # -- output ----------------------------------------------------------
+    def validate(self) -> Embed:
+        """Check this embed against Discord's limits, raising ``InvalidEmbedError``."""
+        self._data.validate()
+        return self
+
+    def to_dict(self) -> dict:
+        """The raw embed JSON payload (validates first)."""
+        self.validate()
+        return self._data.to_dict()
+
+    def to_discord(self) -> discord.Embed:
+        """Build a real ``discord.Embed`` (validates first)."""
+        self.validate()
+        return self._data.to_discord()
+
+    def files(self) -> list:
+        """``discord.File`` objects for any local images — pass as ``files=`` when sending."""
+        return self._data.to_discord_files()
+
+    def __repr__(self) -> str:  # pragma: no cover - cosmetic
+        title = self._data.title
+        return f"<Embed title={title!r} fields={len(self._data.fields)}>"
 
 
 def embed(
-    title: Any = None,
-    description: Any = None,
+    title: str | None = None,
+    description: str | None = None,
     *,
     url: str | None = None,
-    timestamp: datetime | None = None,
-    color: Color | str | int | tuple[int, int, int] | None = None,
-    fields: Iterable[Any] | None = None,
-    footer: str | Footer | None = None,
-    author: str | Author | None = None,
-    thumbnail: Any = None,
-    image: Any = None,
+    color: ColorInput | None = None,
+    colour: ColorInput | None = None,
+    timestamp: _dt.datetime | None = None,
+    footer: str | None = None,
+    footer_icon: ImageInput = None,
+    author: str | None = None,
+    author_url: str | None = None,
+    author_icon: ImageInput = None,
+    thumbnail: ImageInput = None,
+    image: ImageInput = None,
+    fields: Sequence[FieldInput] | None = None,
     theme: Theme | None = None,
-):
-    """Create a native ``discord.Embed`` with Frame's ergonomic defaults."""
-    builder = EmbedBuilder(title, description, theme=theme)
-    builder._url = url
-    builder._timestamp = timestamp
-    builder._color = normalize(color)
-    builder._fields = _parse_fields(fields)
-    if isinstance(footer, Footer):
-        builder._footer = footer
-    elif footer is not None:
-        builder._footer = Footer(str(footer))
-    if isinstance(author, Author):
-        builder._author = author
-    elif author is not None:
-        builder._author = Author(str(author))
-    builder._thumbnail = thumbnail
-    builder._image = image
-    return _compile_embed(builder)
+) -> discord.Embed:
+    """Build a ``discord.Embed`` in one call.
 
+    The simplest form is just a title and description::
 
-class Embed(EmbedBuilder):
-    """Builder alias for advanced fluent construction."""
+        frame.embed("Hello", "World")
 
+    Everything else is keyword-only. ``color``/``colour`` accepts a hex
+    string, an int, an ``(r, g, b)`` tuple, a named color
+    (``frame.colors.blurple`` or the string ``"blurple"``), or a real
+    ``discord.Colour``. ``fields`` accepts a list of ``(name, value)`` or
+    ``(name, value, inline)`` tuples.
 
-__all__ = ["embed", "Embed", "EmbedBuilder", "Theme", "Author", "Footer", "EmbedField"]
+    Returns a plain ``discord.Embed`` — ready to pass straight to
+    ``channel.send(embed=...)``. If you referenced any local images (via
+    ``frame.attachment(...)``), use :func:`frame.Embed` directly instead
+    so you can also retrieve the matching ``discord.File`` objects via
+    ``.files()``.
+    """
+    builder = Embed()
+    if title is not None:
+        builder.title(title)
+    if description is not None:
+        builder.description(description)
+    if url is not None:
+        builder.url(url)
+    resolved_color = color if color is not None else colour
+    if resolved_color is not None:
+        builder.color(resolved_color)
+    if timestamp is not None:
+        builder.timestamp(timestamp)
+    if footer is not None or footer_icon is not None:
+        builder.footer(footer or "", icon=footer_icon)
+        if footer is None:
+            builder._data.footer = None  # icon-only footer stays icon-only
+    if author is not None:
+        builder.author(author, url=author_url, icon=author_icon)
+    if thumbnail is not None:
+        builder.thumbnail(thumbnail)
+    if image is not None:
+        builder.image(image)
+    if fields:
+        builder.fields_from(fields)
+    builder.apply_theme(theme)
+    return builder.to_discord()
